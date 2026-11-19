@@ -1,0 +1,47 @@
+{
+  "name": "@local/dsh-figcraft",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Control the FigCraft desktop app through its local MCP server in attach mode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/madsouris/dsh-figcraft.git"
+  },
+  "homepage": "https://github.com/madsouris/dsh-figcraft#readme",
+  "bugs": {
+    "url": "https://github.com/madsouris/dsh-figcraft/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "figcraft",
+    "mcp",
+    "design"
+  ],
+  "type": "module",
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "bin/*",
+    "shell/*",
+    "scripts/*",
+    "docs/*",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "bash -n bin/figcraft-mcp bin/figcraft-session scripts/install.sh"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

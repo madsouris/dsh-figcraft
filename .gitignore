@@ -1,0 +1,11 @@
+node_modules/
+.DS_Store
+*.log
+
+# Local design files and downloaded binaries
+*.figcraft
+figcraft-cli/
+
+# Local secrets
+.env
+.env.*

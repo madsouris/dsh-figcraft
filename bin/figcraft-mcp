@@ -1,0 +1,44 @@
+#!/bin/bash
+# Start FigCraft's MCP server in attach mode.
+#
+# DSH's bundle patch runs this through /bin/sh. Keep it dependency-free: it
+# only resolves figcraft-cli and replaces itself with the MCP process.
+set -u
+
+find_cli() {
+  local candidate
+
+  if [ -n "${FIGCRAFT_CLI:-}" ]; then
+    if [ -x "$FIGCRAFT_CLI" ]; then
+      printf '%s\n' "$FIGCRAFT_CLI"
+      return 0
+    fi
+    printf 'FIGCRAFT_CLI points to %s, which is not executable.\n' "$FIGCRAFT_CLI" >&2
+    return 1
+  fi
+
+  for candidate in \
+    "$HOME/.local/bin/figcraft-cli" \
+    /opt/homebrew/bin/figcraft-cli \
+    /usr/local/bin/figcraft-cli
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v figcraft-cli 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  printf 'figcraft-cli not found. Run scripts/install.sh --with-cli, or set FIGCRAFT_CLI.\n' >&2
+  return 1
+}
+
+CLI="$(find_cli)" || exit 1
+
+# figon starts the app on this port. Change both if you change one.
+exec "$CLI" mcp --attach 7979
