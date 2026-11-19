@@ -3,42 +3,56 @@
 #
 # DSH's bundle patch runs this through /bin/sh. Keep it dependency-free: it
 # only resolves figcraft-cli and replaces itself with the MCP process.
+#
+# Linux packages put figcraft-cli on PATH. An AppImage runs it as
+# `FigCraft.AppImage cli ...`; a Flatpak runs it with --command=figcraft-cli.
 set -u
 
-find_cli() {
-  local candidate
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dsh-figcraft/config"
+if [ -f "$CONFIG" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+fi
 
-  if [ -n "${FIGCRAFT_CLI:-}" ]; then
-    if [ -x "$FIGCRAFT_CLI" ]; then
-      printf '%s\n' "$FIGCRAFT_CLI"
-      return 0
-    fi
-    printf 'FIGCRAFT_CLI points to %s, which is not executable.\n' "$FIGCRAFT_CLI" >&2
-    return 1
+if [ -n "${FIGCRAFT_CLI:-}" ]; then
+  if [ -x "$FIGCRAFT_CLI" ]; then
+    exec "$FIGCRAFT_CLI" mcp --attach 7979
   fi
+  printf 'FIGCRAFT_CLI points to %s, which is not executable.\n' "$FIGCRAFT_CLI" >&2
+  exit 1
+fi
 
-  for candidate in \
-    "$HOME/.local/bin/figcraft-cli" \
-    /opt/homebrew/bin/figcraft-cli \
-    /usr/local/bin/figcraft-cli
-  do
-    if [ -x "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
+if [ -n "${FIGCRAFT_APP:-}" ]; then
+  case "$FIGCRAFT_APP" in
+    *.AppImage)
+      if [ -x "$FIGCRAFT_APP" ]; then
+        exec "$FIGCRAFT_APP" cli mcp --attach 7979
+      fi
+      printf 'FIGCRAFT_APP points to %s, which is not executable.\n' "$FIGCRAFT_APP" >&2
+      exit 1
+      ;;
+  esac
+fi
 
-  candidate="$(command -v figcraft-cli 2>/dev/null || true)"
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    printf '%s\n' "$candidate"
-    return 0
+for candidate in \
+  "$HOME/.local/bin/figcraft-cli" \
+  /opt/homebrew/bin/figcraft-cli \
+  /usr/local/bin/figcraft-cli \
+  /usr/bin/figcraft-cli
+do
+  if [ -x "$candidate" ]; then
+    exec "$candidate" mcp --attach 7979
   fi
+done
 
-  printf 'figcraft-cli not found. Run scripts/install.sh --with-cli, or set FIGCRAFT_CLI.\n' >&2
-  return 1
-}
+candidate="$(command -v figcraft-cli 2>/dev/null || true)"
+if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+  exec "$candidate" mcp --attach 7979
+fi
 
-CLI="$(find_cli)" || exit 1
+if command -v flatpak >/dev/null 2>&1 && flatpak info ai.storyteller.figcraft >/dev/null 2>&1; then
+  exec flatpak run --command=figcraft-cli ai.storyteller.figcraft mcp --attach 7979
+fi
 
-# figon starts the app on this port. Change both if you change one.
-exec "$CLI" mcp --attach 7979
+printf 'figcraft-cli not found. Install FigCraft from the release package, run scripts/install.sh --with-cli on macOS, or set FIGCRAFT_CLI.\n' >&2
+exit 1

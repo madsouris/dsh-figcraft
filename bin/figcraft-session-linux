@@ -1,0 +1,390 @@
+#!/bin/bash
+# On-demand FigCraft launcher for Linux.
+#
+# FigCraft exposes its MCP control port only when it starts with --control PORT.
+# This script starts the app detached from the terminal and records its pid, so
+# `down` can stop it again. Nothing starts at login.
+#
+# Run it from your desktop terminal. A shell inside an agent sandbox can pass
+# that sandbox to FigCraft, which then fails to save files outside it.
+#
+#   figcraft-session up [file]   start FigCraft, optionally opening a file
+#   figcraft-session down        quit FigCraft
+#   figcraft-session status      show app, port and CLI state
+#   figcraft-session cli ...     run figcraft-cli itself
+set -u
+
+PORT=7979
+APP_ID="ai.storyteller.figcraft"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/dsh-figcraft"
+PID_FILE="$STATE_DIR/app.pid"
+LOG="$STATE_DIR/control.log"
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dsh-figcraft/config"
+if [ -f "$CONFIG" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+fi
+
+port_up() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$PORT") >/dev/null 2>&1
+}
+
+app_running() {
+  pgrep -x figcraft >/dev/null 2>&1 || pgrep -f "$APP_ID" >/dev/null 2>&1
+}
+
+flatpak_installed() {
+  command -v flatpak >/dev/null 2>&1 && flatpak info "$APP_ID" >/dev/null 2>&1
+}
+
+find_app() {
+  local candidate
+
+  if [ -n "${FIGCRAFT_APP:-}" ]; then
+    if [ -x "$FIGCRAFT_APP" ]; then
+      printf '%s\n' "$FIGCRAFT_APP"
+      return 0
+    fi
+    printf 'FIGCRAFT_APP points to %s, which is not executable.\n' "$FIGCRAFT_APP" >&2
+    return 1
+  fi
+
+  for candidate in \
+    /usr/bin/figcraft \
+    /usr/local/bin/figcraft \
+    "$HOME/.local/bin/figcraft"
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v figcraft 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  if flatpak_installed; then
+    printf 'flatpak\n'
+    return 0
+  fi
+
+  printf 'FigCraft is not installed. Install the .deb, .rpm or .pkg.tar.zst from the release, or set FIGCRAFT_APP.\n' >&2
+  return 1
+}
+
+find_cli() {
+  local app="${1:-}"
+  local candidate
+
+  if [ -n "${FIGCRAFT_CLI:-}" ]; then
+    if [ -x "$FIGCRAFT_CLI" ]; then
+      printf '%s\n' "$FIGCRAFT_CLI"
+      return 0
+    fi
+    printf 'FIGCRAFT_CLI points to %s, which is not executable.\n' "$FIGCRAFT_CLI" >&2
+    return 1
+  fi
+
+  for candidate in \
+    /usr/bin/figcraft-cli \
+    /usr/local/bin/figcraft-cli \
+    "$HOME/.local/bin/figcraft-cli"
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v figcraft-cli 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  case "$app" in
+    *.AppImage)
+      if [ -x "$app" ]; then
+        printf 'appimage\n'
+        return 0
+      fi
+      ;;
+  esac
+
+  if flatpak_installed; then
+    printf 'flatpak\n'
+    return 0
+  fi
+
+  printf 'figcraft-cli not found. The Linux packages include it; reinstall FigCraft, or set FIGCRAFT_CLI.\n' >&2
+  return 1
+}
+
+wait_for_port() {
+  local i=0
+  while [ "$i" -lt 120 ]; do
+    port_up && return 0
+    sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+
+json_escape() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+open_file() {
+  local file="$1"
+  local request reply
+
+  request="{\"id\":1,\"method\":\"engine.execute\",\"params\":{\"command\":\"file.open\",\"params\":{\"path\":\"$(json_escape "$file")\"}}}"
+
+  if ! exec 3<>"/dev/tcp/127.0.0.1/$PORT" 2>/dev/null; then
+    printf 'Could not reach FigCraft on port %s.\n' "$PORT" >&2
+    return 1
+  fi
+
+  printf '%s\n' "$request" >&3
+  if ! IFS= read -r -t 30 reply <&3; then
+    exec 3<&-
+    printf 'FigCraft did not answer the open request.\n' >&2
+    return 1
+  fi
+  exec 3<&-
+
+  case "$reply" in
+    *'"ok":true'*|*'"ok": true'*)
+      printf 'Opened %s\n' "$file"
+      ;;
+    *)
+      printf 'Could not open %s: %s\n' "$file" "$reply" >&2
+      return 1
+      ;;
+  esac
+}
+
+start_app() {
+  local app="$1"
+
+  mkdir -p "$STATE_DIR" || return 1
+
+  if [ "$app" = "flatpak" ]; then
+    nohup flatpak run "$APP_ID" --control "$PORT" >>"$LOG" 2>&1 &
+    printf 'flatpak\n' > "$PID_FILE"
+    return 0
+  fi
+
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid "$app" --control "$PORT" >>"$LOG" 2>&1 < /dev/null &
+  else
+    nohup "$app" --control "$PORT" >>"$LOG" 2>&1 < /dev/null &
+  fi
+  printf '%s\n' "$!" > "$PID_FILE"
+}
+
+up() {
+  local file=""
+  local app=""
+  local cli=""
+
+  if [ "$#" -gt 0 ]; then
+    file="$1"
+    if [ ! -f "$file" ]; then
+      printf 'No such file: %s\n' "$file" >&2
+      return 1
+    fi
+    case "$file" in
+      /*) ;;
+      *) file="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" ;;
+    esac
+  fi
+
+  if ! app="$(find_app)"; then
+    return 1
+  fi
+
+  if ! cli="$(find_cli "$app")"; then
+    return 1
+  fi
+
+  if port_up; then
+    printf 'FigCraft is already running with the control port %s.\n' "$PORT"
+  else
+    if app_running; then
+      printf 'FigCraft is running without the control port.\n' >&2
+      printf 'Save your work, quit FigCraft, then run figon again.\n' >&2
+      return 1
+    fi
+
+    start_app "$app" || return 1
+
+    if ! wait_for_port; then
+      printf 'FigCraft started but port %s did not open.\n' "$PORT" >&2
+      printf 'See %s\n' "$LOG" >&2
+      return 1
+    fi
+
+    printf 'FigCraft started with the control port %s.\n' "$PORT"
+  fi
+
+  if [ -n "$file" ]; then
+    open_file "$file" || return 1
+  fi
+
+  case "$cli" in
+    flatpak)
+      printf 'CLI:  flatpak run --command=figcraft-cli %s\n' "$APP_ID"
+      ;;
+    appimage)
+      printf 'CLI:  %s cli\n' "$app"
+      ;;
+    *)
+      printf 'CLI:  %s\n' "$cli"
+      ;;
+  esac
+  printf 'Start DSH now, or restart it if it was running before FigCraft.\n'
+  printf 'Stop with: figoff\n'
+}
+
+down() {
+  local pid=""
+  local i=0
+
+  if [ -f "$PID_FILE" ]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  fi
+
+  if [ "$pid" = "flatpak" ]; then
+    flatpak kill "$APP_ID" >/dev/null 2>&1 || true
+  elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+  elif port_up; then
+    printf 'FigCraft is running but was not started by figon.\n' >&2
+    printf 'Quit it from the app, then run figoff again.\n' >&2
+    return 1
+  else
+    printf 'FigCraft is not running.\n'
+    rm -f "$PID_FILE"
+    return 0
+  fi
+
+  while [ "$i" -lt 40 ]; do
+    if ! port_up && ! app_running; then
+      break
+    fi
+    sleep 0.25
+    i=$((i + 1))
+  done
+
+  if port_up || app_running; then
+    printf 'FigCraft is still running. Save your work and quit it from the app.\n' >&2
+    return 1
+  fi
+
+  rm -f "$PID_FILE"
+  printf 'FigCraft stopped.\n'
+}
+
+status() {
+  local app=""
+  local cli=""
+  local version=""
+
+  if port_up; then
+    printf 'FigCraft: running (control port %s open)\n' "$PORT"
+  elif app_running; then
+    printf 'FigCraft: running WITHOUT the control port\n'
+  else
+    printf 'FigCraft: stopped\n'
+  fi
+
+  app="$(find_app 2>/dev/null || true)"
+  case "$app" in
+    flatpak)
+      printf 'app:      flatpak (%s)\n' "$APP_ID"
+      ;;
+    "")
+      printf 'app:      missing\n'
+      ;;
+    *)
+      if [ -x "$app" ]; then
+        printf 'app:      %s\n' "$app"
+      else
+        printf 'app:      missing (%s)\n' "$app"
+      fi
+      ;;
+  esac
+
+  cli="$(find_cli "$app" 2>/dev/null || true)"
+  case "$cli" in
+    flatpak)
+      version="$(flatpak run --command=figcraft-cli "$APP_ID" --version 2>/dev/null | head -n 1 || true)"
+      printf 'cli:      flatpak (%s)\n' "${version:-version unknown}"
+      ;;
+    appimage)
+      version="$("$app" cli --version 2>/dev/null | head -n 1 || true)"
+      printf 'cli:      %s cli (%s)\n' "$app" "${version:-version unknown}"
+      ;;
+    "")
+      printf 'cli:      missing\n'
+      ;;
+    *)
+      version="$("$cli" --version 2>/dev/null | head -n 1 || true)"
+      printf 'cli:      %s (%s)\n' "$cli" "${version:-version unknown}"
+      ;;
+  esac
+
+  if [ -f "$PID_FILE" ]; then
+    printf 'pid:      %s\n' "$(cat "$PID_FILE" 2>/dev/null || true)"
+  fi
+}
+
+cli_action() {
+  local app=""
+  local cli=""
+
+  if ! app="$(find_app)"; then
+    exit 1
+  fi
+  if ! cli="$(find_cli "$app")"; then
+    exit 1
+  fi
+
+  case "$cli" in
+    flatpak)
+      exec flatpak run --command=figcraft-cli "$APP_ID" "$@"
+      ;;
+    appimage)
+      exec "$app" cli "$@"
+      ;;
+    *)
+      exec "$cli" "$@"
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  up)
+    shift
+    up "$@"
+    ;;
+  down)
+    down
+    ;;
+  status)
+    status
+    ;;
+  cli)
+    shift
+    cli_action "$@"
+    ;;
+  *)
+    printf 'usage: figcraft-session {up [file] | down | status | cli <args...>}\n' >&2
+    exit 2
+    ;;
+esac

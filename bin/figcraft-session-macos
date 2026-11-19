@@ -1,0 +1,259 @@
+#!/bin/bash
+# On-demand FigCraft launcher for macOS.
+#
+# FigCraft exposes its MCP control port only when it starts with --control PORT.
+# macOS `open` drops that flag, so this script writes a per-user launchd job and
+# starts the app through launchd. Nothing runs at login. `down` unloads the job
+# and quits the app.
+#
+#   figcraft-session up [file]   start FigCraft, optionally opening a file
+#   figcraft-session down        quit FigCraft and unload the job
+#   figcraft-session status      show app, port, CLI and launchd state
+#   figcraft-session cli ...     run figcraft-cli itself
+set -u
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/dsh-figcraft/config"
+if [ -f "$CONFIG" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG"
+fi
+
+APP_BUNDLE="${FIGCRAFT_APP:-/Applications/FigCraft.app}"
+APP="$APP_BUNDLE/Contents/MacOS/FigCraft"
+PORT=7979
+LABEL="local.dsh.figcraft.control"
+STATE_DIR="$HOME/Library/Application Support/dsh-figcraft"
+PLIST="$STATE_DIR/$LABEL.plist"
+LOG_DIR="$HOME/Library/Logs/dsh-figcraft"
+LOG="$LOG_DIR/control.log"
+DOMAIN="gui/$(id -u)"
+
+port_up() {
+  nc -z 127.0.0.1 "$PORT" >/dev/null 2>&1
+}
+
+app_running() {
+  pgrep -x FigCraft >/dev/null 2>&1
+}
+
+find_cli() {
+  local candidate
+
+  if [ -n "${FIGCRAFT_CLI:-}" ]; then
+    if [ -x "$FIGCRAFT_CLI" ]; then
+      printf '%s\n' "$FIGCRAFT_CLI"
+      return 0
+    fi
+    printf 'FIGCRAFT_CLI points to %s, which is not executable.\n' "$FIGCRAFT_CLI" >&2
+    return 1
+  fi
+
+  for candidate in \
+    "$HOME/.local/bin/figcraft-cli" \
+    /opt/homebrew/bin/figcraft-cli \
+    /usr/local/bin/figcraft-cli
+  do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  candidate="$(command -v figcraft-cli 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  printf 'figcraft-cli not found. Run scripts/install.sh --with-cli, or set FIGCRAFT_CLI.\n' >&2
+  return 1
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+write_plist() {
+  local app_xml log_xml
+  app_xml="$(xml_escape "$APP")"
+  log_xml="$(xml_escape "$LOG")"
+
+  mkdir -p "$STATE_DIR" "$LOG_DIR" || return 1
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$app_xml</string>
+    <string>--control</string>
+    <string>$PORT</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>StandardOutPath</key>
+  <string>$log_xml</string>
+  <key>StandardErrorPath</key>
+  <string>$log_xml</string>
+</dict>
+</plist>
+EOF
+}
+
+bootout_label() {
+  launchctl bootout "$DOMAIN/$1" >/dev/null 2>&1 || true
+}
+
+wait_for_port() {
+  local i=0
+  while [ "$i" -lt 120 ]; do
+    port_up && return 0
+    sleep 0.25
+    i=$((i + 1))
+  done
+  return 1
+}
+
+up() {
+  local file=""
+  local cli=""
+
+  if [ "$#" -gt 0 ]; then
+    file="$1"
+    if [ ! -f "$file" ]; then
+      printf 'No such file: %s\n' "$file" >&2
+      return 1
+    fi
+    case "$file" in
+      /*) ;;
+      *) file="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")" ;;
+    esac
+  fi
+
+  if [ ! -x "$APP" ]; then
+    printf 'FigCraft is not installed at %s\n' "$APP_BUNDLE" >&2
+    printf 'Install it with: brew install --cask figcraft\n' >&2
+    return 1
+  fi
+
+  if ! cli="$(find_cli)"; then
+    return 1
+  fi
+
+  if port_up; then
+    printf 'FigCraft is already running with the control port %s.\n' "$PORT"
+  else
+    if app_running; then
+      printf 'FigCraft is running without the control port.\n' >&2
+      printf 'Save your work, quit FigCraft, then run figon again.\n' >&2
+      return 1
+    fi
+
+    write_plist || return 1
+    bootout_label "$LABEL"
+
+    if ! launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1; then
+      printf 'Could not start FigCraft through launchd.\n' >&2
+      return 1
+    fi
+
+    if ! wait_for_port; then
+      printf 'FigCraft started but port %s did not open.\n' "$PORT" >&2
+      printf 'See %s\n' "$LOG" >&2
+      return 1
+    fi
+
+    printf 'FigCraft started with the control port %s.\n' "$PORT"
+  fi
+
+  if [ -n "$file" ]; then
+    if ! open -a "$APP_BUNDLE" "$file"; then
+      printf 'Could not open %s\n' "$file" >&2
+      return 1
+    fi
+    printf 'Opened %s\n' "$file"
+  fi
+
+  printf 'CLI:  %s\n' "$cli"
+  printf 'Start DSH now, or restart it if it was running before FigCraft.\n'
+  printf 'Stop with: figoff\n'
+}
+
+down() {
+  bootout_label "$LABEL"
+
+  local i=0
+  while app_running && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+
+  if app_running; then
+    printf 'FigCraft is still running. Save your work and quit it, or: pkill -x FigCraft\n' >&2
+    return 1
+  fi
+
+  printf 'FigCraft stopped.\n'
+}
+
+status() {
+  local cli=""
+  local version=""
+
+  if port_up; then
+    printf 'FigCraft: running (control port %s open)\n' "$PORT"
+  elif app_running; then
+    printf 'FigCraft: running WITHOUT the control port\n'
+  else
+    printf 'FigCraft: stopped\n'
+  fi
+
+  if [ -x "$APP" ]; then
+    if [ -f "$APP_BUNDLE/Contents/Info.plist" ]; then
+      version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true)
+    fi
+    printf 'app:      %s%s\n' "$APP_BUNDLE" "${version:+ (v$version)}"
+  else
+    printf 'app:      missing (%s)\n' "$APP_BUNDLE"
+  fi
+
+  if cli="$(find_cli 2>/dev/null)"; then
+    printf 'cli:      %s (%s)\n' "$cli" "$("$cli" --version 2>/dev/null || printf 'version unknown')"
+  else
+    printf 'cli:      missing\n'
+  fi
+
+  launchctl print "$DOMAIN/$LABEL" 2>/dev/null \
+    | awk -F' = ' '/state =/ {print "launchd:  " $2; found=1; exit} END {if (!found) print "launchd:  not loaded"}'
+}
+
+case "${1:-}" in
+  up)
+    shift
+    up "$@"
+    ;;
+  down)
+    down
+    ;;
+  status)
+    status
+    ;;
+  cli)
+    shift
+    if ! CLI="$(find_cli)"; then
+      exit 1
+    fi
+    exec "$CLI" "$@"
+    ;;
+  *)
+    printf 'usage: figcraft-session {up [file] | down | status | cli <args...>}\n' >&2
+    exit 2
+    ;;
+esac

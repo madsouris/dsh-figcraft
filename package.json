@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-figcraft",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Control the FigCraft desktop app through its local MCP server in attach mode",
+  "description": "Control the FigCraft desktop app through its local MCP server in attach mode on macOS, Linux and Windows",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,7 +18,10 @@
     "dsh-plugin",
     "figcraft",
     "mcp",
-    "design"
+    "design",
+    "macos",
+    "linux",
+    "windows"
   ],
   "type": "module",
   "exports": {
@@ -37,7 +40,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "bash -n bin/figcraft-mcp bin/figcraft-session scripts/install.sh"
+    "check": "bash -n bin/figcraft-mcp bin/figcraft-session bin/figcraft-session-macos bin/figcraft-session-linux scripts/install.sh"
   },
   "dsh": {
     "bundle": {

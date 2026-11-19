@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "FigCraft",
-    "description": "Design in the FigCraft desktop app through its local MCP server, with every edit visible live. Start FigCraft first with the figon launcher, then start or restart DSH so it can attach figcraft-cli to the app's control port. Requires macOS, FigCraft 0.18.1 or later, and figcraft-cli. Nothing runs at login, and the tools stay unavailable while the app is closed."
+    "description": "Design in the FigCraft desktop app through its local MCP server, with every edit visible live. Start FigCraft first with the figon launcher, then start or restart DSH so it can attach figcraft-cli to the app's control port. Requires FigCraft 0.18.1 or later with its CLI on macOS, Linux or Windows. Nothing runs at login, and the tools stay unavailable while the app is closed."
   }
 }

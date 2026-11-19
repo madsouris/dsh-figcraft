@@ -1,0 +1,41 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  posix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: |
+          bash -n bin/figcraft-mcp
+          bash -n bin/figcraft-session
+          bash -n bin/figcraft-session-macos
+          bash -n bin/figcraft-session-linux
+          bash -n scripts/install.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($file in @('bin/figcraft-session.ps1', 'scripts/install.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $file).Path, [ref]$tokens, [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              $failed = $true
+              foreach ($error in $errors) {
+                Write-Host "${file}:$($error.Extent.StartLineNumber): $($error.Message)"
+              }
+            }
+          }
+          if ($failed) { exit 1 }

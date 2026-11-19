@@ -4,11 +4,12 @@
 # mode keeps every edit visible in the running app. The app must be started with
 # `--control 7979`; the `figon` launcher does that and `figoff` stops it.
 #
-# The /bin/sh hop adds ~/.local/bin because DSH started from Finder does not
-# inherit the shell PATH. It then execs the wrapper shipped in bin/.
+# Two rows, one per platform family. DSH evaluates `disabled` with the real
+# `process`, so exactly one row mounts.
 - insert:
     - id: figcraft-mcp
       name: '@deepseek-ai/dsh-mcp-client'
+      disabled: !!js process.platform === 'win32'
       config:
         serverName: figcraft
         transport: stdio
@@ -18,6 +19,24 @@
           - |
             PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
             exec figcraft-mcp
+        failOnStartupError: false
+        toolCallTimeoutMs: 120000
+        reconnect:
+          enabled: true
+          initialDelayMs: 1000
+          maxDelayMs: 30000
+          maxAttempts: 30
+
+    # Windows installs figcraft-cli.exe next to figcraft.exe. scripts/install.ps1
+    # puts that folder on PATH, so CreateProcess resolves the command directly.
+    - id: figcraft-mcp-windows
+      name: '@deepseek-ai/dsh-mcp-client'
+      disabled: !!js process.platform !== 'win32'
+      config:
+        serverName: figcraft
+        transport: stdio
+        command: figcraft-cli.exe
+        args: ['mcp', '--attach', '7979']
         failOnStartupError: false
         toolCallTimeoutMs: 120000
         reconnect:

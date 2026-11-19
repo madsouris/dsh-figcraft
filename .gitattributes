@@ -1,0 +1,10 @@
+* text=auto
+
+*.sh text eol=lf
+bin/figcraft-mcp text eol=lf
+bin/figcraft-session text eol=lf
+bin/figcraft-session-macos text eol=lf
+bin/figcraft-session-linux text eol=lf
+
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
